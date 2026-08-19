@@ -1,0 +1,15 @@
+{
+  "name": "oc26-story",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "オープンキャンパス向け・みんなの投票で物語を作るリアルタイム体験",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
