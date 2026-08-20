@@ -54,11 +54,12 @@ async function post(path, body, operator = false) {
 }
 
 function header(label) {
-  if (label === "参加者画面") {
+  if (["参加者画面", "運営者画面"].includes(label)) {
+    const roleClass = label === "参加者画面" ? "participant" : "operator";
     return `
-      <header class="topbar participant-topbar">
-        <div class="brand"><span class="participant-brand-mark" aria-hidden="true"></span><span>OC26&nbsp;&nbsp;STORY VOTE</span></div>
-        <div class="role-label">参加者画面</div>
+      <header class="topbar ${roleClass}-topbar">
+        <div class="brand"><span class="${roleClass}-brand-mark" aria-hidden="true"></span><span>OC26&nbsp;&nbsp;STORY VOTE</span></div>
+        <div class="role-label">${escapeHtml(label)}</div>
       </header>`;
   }
   return `
@@ -173,7 +174,7 @@ function actionButtons() {
     actions.push(["advance", state.phase === "waiting" ? "開始" : state.phase === "revealed" ? "次のラウンドへ" : "次へ", "primary"]);
   }
   if (state.phase === "round-ready") actions.push(["open-vote", "投票開始", "primary"]);
-  if (state.phase === "voting") actions.push(["close-vote", "投票締切", "danger"]);
+  if (state.phase === "voting") actions.push(["close-vote", "投票を締め切る", "primary"]);
   if (state.phase === "closed") actions.push(["draw", "抽選実行", "primary"]);
   return actions.map(([action, label, kind]) => `<button class="control-button ${kind}" data-action="${action}">${label}</button>`).join("");
 }
@@ -184,29 +185,57 @@ function renderOperator() {
     waiting: "待機中", intro: "導入説明", "token-demo": "トークン説明", "round-ready": "投票準備", voting: "投票中", closed: "締切済み", revealed: "結果発表", finished: "終了"
   };
   const manualInputs = state.mode === "manual" && state.currentNode && ["voting", "closed"].includes(state.phase)
-    ? `<section class="operator-card"><h2>挙手数を入力</h2><div class="manual-inputs">${state.currentNode.choices.map((choice, index) => `<label><span>${String.fromCharCode(65 + index)}</span><input type="number" min="0" max="999" value="${state.counts.find((item) => item.choiceId === choice.id)?.count ?? 0}" data-manual-count="${choice.id}"></label>`).join("")}</div><button class="secondary-button" data-save-counts>挙手数を反映</button></section>`
+    ? `<div class="operator-manual"><p class="operator-field-label">挙手数</p><div class="manual-inputs">${state.currentNode.choices.map((choice, index) => `<label><span>${String.fromCharCode(65 + index)}</span><input type="number" min="0" max="999" value="${state.counts.find((item) => item.choiceId === choice.id)?.count ?? 0}" data-manual-count="${choice.id}" aria-label="選択肢${String.fromCharCode(65 + index)}の挙手数"></label>`).join("")}</div><button class="operator-button secondary" data-save-counts>挙手数を反映</button></div>`
     : "";
+  const currentAction = actionButtons();
+  const choices = state.currentNode?.choices ?? [];
+  const round = state.currentNode?.round;
+  const maxRound = state.story?.maxRounds ?? 4;
 
-  app.innerHTML = `${header("運営者パネル")}<div class="operator-shell">
+  app.innerHTML = `${header("運営者画面")}<main class="operator-shell">
     <section class="operator-summary">
       <div><span>現在の状態</span><strong>${phaseLabels[state.phase]}</strong></div>
       <div><span>参加端末</span><strong>${state.connectedParticipants}台</strong></div>
       <div><span>投票数</span><strong>${state.totalVotes}票</strong></div>
-      <div><span>ラウンド</span><strong>${state.currentNode?.round ?? "—"}</strong></div>
+      <div><span>ラウンド</span><strong>${round ? `${round} / ${maxRound}` : "—"}</strong></div>
     </section>
-    <div class="operator-grid">
-      <section class="operator-card main-controls"><h2>進行操作</h2><div class="control-row">${actionButtons()}</div><p class="operator-hint">スペースキーでも、現在表示されている主操作を実行できます。</p></section>
-      <section class="operator-card"><h2>運営者PIN</h2><label class="pin-field"><span>PIN</span><input type="password" value="${escapeHtml(pin)}" data-pin autocomplete="off"></label></section>
-      <section class="operator-card"><h2>抽選の偏り β</h2><div class="preset-row">${[0.5, 1, 2].map((beta) => `<button class="preset ${state.beta === beta ? "active" : ""}" data-beta="${beta}">β = ${beta}</button>`).join("")}</div><p>${state.beta === 1 ? "得票率をそのまま反映" : state.beta === 2 ? "得票の多い候補を強く優先" : "少数票の候補も選ばれやすくする"}</p></section>
-      <section class="operator-card"><h2>投票方式</h2><div class="preset-row"><button class="preset ${state.mode === "online" ? "active" : ""}" data-mode="online">PC投票</button><button class="preset ${state.mode === "manual" ? "active" : ""}" data-mode="manual">挙手投票</button></div><p>通信に問題がある場合は、挙手投票へ切り替えます。</p></section>
-      ${manualInputs}
-      <section class="operator-card danger-zone"><h2>全体リセット</h2><button class="secondary-button danger" data-action="reset">最初の状態に戻す</button></section>
+    <div class="operator-workspace">
+      <section class="operator-card main-controls">
+        <div class="operator-card-heading"><h2>進行操作</h2>${state.phase === "voting" ? `<span class="voting-status">投票受付中</span>` : ""}</div>
+        <div class="control-row">${currentAction || `<button class="operator-button secondary" disabled>現在実行できる操作はありません</button>`}</div>
+        <p class="operator-hint">スペースキーでも、現在の主操作を実行できます</p>
+        <hr>
+        <p class="operator-read-label">読み上げ用</p>
+        <h3>${escapeHtml(state.currentNode?.prompt ?? "中央モニターの案内に沿って進めます")}</h3>
+        <div class="operator-choice-list">${choices.map((choice, index) => `<p>${String.fromCharCode(65 + index)}. ${escapeHtml(choice.text)}</p>`).join("") || `<p>参加者に開始まで待つよう案内してください。</p>`}</div>
+      </section>
+      <aside class="operator-settings">
+        <section class="operator-card voting-settings">
+          <h2>投票設定</h2>
+          <p class="operator-field-label">集計の強さ（β）</p>
+          <div class="preset-row beta-row">${[0.5, 1, 2].map((beta) => `<button class="preset ${state.beta === beta ? "active" : ""}" data-beta="${beta}">β = ${beta}</button>`).join("")}</div>
+          <p class="operator-field-label">投票方法</p>
+          <div class="preset-row"><button class="preset ${state.mode === "online" ? "active" : ""}" data-mode="online">PC投票</button><button class="preset ${state.mode === "manual" ? "active" : ""}" data-mode="manual">挙手投票</button></div>
+          ${manualInputs}
+          <p class="operator-setting-note">変更は次の投票から反映されます</p>
+        </section>
+        <section class="operator-card safety-card">
+          <div class="operator-card-heading"><h2>安全・復旧</h2><span class="pin-status ${pin ? "authenticated" : ""}">${pin ? "PIN 入力済み" : "PIN 未入力"}</span></div>
+          <label class="pin-field"><span>運営者PIN</span><input type="password" value="${escapeHtml(pin)}" data-pin autocomplete="off" placeholder="PINを入力"></label>
+          <button class="operator-button secondary" data-action="reset">全体をリセット</button>
+          <p class="operator-setting-note">物語と投票結果を最初の状態に戻します</p>
+        </section>
+      </aside>
     </div>
-    ${state.currentNode ? `<section class="operator-script"><p class="eyebrow">読み上げ用</p><h2>${escapeHtml(state.currentNode.prompt)}</h2>${state.currentNode.choices.map((choice, index) => `<p><strong>${String.fromCharCode(65 + index)}.</strong> ${escapeHtml(choice.text)}</p>`).join("")}</section>` : ""}
-  </div>`;
+  </main>`;
 
   document.querySelector("[data-pin]")?.addEventListener("input", (event) => {
     sessionStorage.setItem("operator-pin", event.target.value);
+    const status = document.querySelector(".pin-status");
+    if (status) {
+      status.textContent = event.target.value ? "PIN 入力済み" : "PIN 未入力";
+      status.classList.toggle("authenticated", Boolean(event.target.value));
+    }
   });
   document.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => runOperatorAction(button.dataset.action)));
   document.querySelectorAll("[data-beta]").forEach((button) => button.addEventListener("click", () => runOperatorAction("set-beta", { beta: Number(button.dataset.beta) })));

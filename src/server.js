@@ -4,6 +4,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { story } from "./story-data.js";
 import { StorySession } from "./session.js";
+import { projectStateForRole, resolveStateRole } from "./application/state-projections.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const OPERATOR_PIN = process.env.OPERATOR_PIN || "260822";
@@ -25,8 +26,12 @@ function connectedParticipantCount() {
   return participantConnections.size;
 }
 
-function publicState() {
+function fullState() {
   return session.getPublicState(connectedParticipantCount());
+}
+
+function stateForRole(role) {
+  return projectStateForRole(fullState(), role);
 }
 
 function sendJson(response, status, body) {
@@ -52,8 +57,10 @@ async function readJson(request) {
 }
 
 function broadcast() {
-  const payload = `data: ${JSON.stringify(publicState())}\n\n`;
-  for (const client of eventClients) client.response.write(payload);
+  for (const client of eventClients) {
+    const payload = `data: ${JSON.stringify(stateForRole(client.role))}\n\n`;
+    client.response.write(payload);
+  }
 }
 
 function addParticipantConnection(clientId) {
@@ -69,7 +76,7 @@ function removeParticipantConnection(clientId) {
 }
 
 function handleEvents(request, response, url) {
-  const role = url.searchParams.get("role") || "participant";
+  const role = resolveStateRole(url.searchParams.get("role"));
   const clientId = url.searchParams.get("clientId") || "";
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -139,7 +146,7 @@ async function handleOperator(request, response) {
   }
 
   broadcast();
-  sendJson(response, 200, { ok: true, state: publicState() });
+  sendJson(response, 200, { ok: true, state: stateForRole("operator") });
 }
 
 function serveStatic(response, pathname) {
@@ -165,7 +172,8 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   try {
     if (request.method === "GET" && url.pathname === "/api/state") {
-      sendJson(response, 200, publicState());
+      const role = resolveStateRole(url.searchParams.get("role"));
+      sendJson(response, 200, stateForRole(role));
     } else if (request.method === "GET" && url.pathname === "/api/events") {
       handleEvents(request, response, url);
     } else if (request.method === "POST" && url.pathname === "/api/vote") {
