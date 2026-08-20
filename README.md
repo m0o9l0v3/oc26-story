@@ -53,7 +53,12 @@ PINを指定しない場合は、開発用の `260822` が使用されます。�
 ## デザイン
 
 - [Figma：参加者画面](https://www.figma.com/design/GgAtss1Qwq7DjVKNWufUD8/無題?node-id=10-2&m=dev)
+- [Figma：運営者画面](https://www.figma.com/design/GgAtss1Qwq7DjVKNWufUD8/無題?node-id=25-17&m=dev)
 - Figmaの色・余白・角丸は、`public/styles.css` のCSS変数と同じ名前で管理しています。
+
+## 開発計画
+
+- [バックエンド開発計画](docs/backend-development-plan.md)
 
 ## Cloudflare Tunnelで公開
 
