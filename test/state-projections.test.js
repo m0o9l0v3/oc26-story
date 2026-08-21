@@ -9,6 +9,7 @@ const fullState = {
   history: [],
   storyText: "opening",
   connectedParticipants: 3,
+  revision: 7,
   updatedAt: "2026-08-20T00:00:00.000Z",
   counts: [{ choiceId: "a", count: 2 }],
   totalVotes: 2,
@@ -27,12 +28,27 @@ test("participant projection uses a strict allow-list", () => {
     history: fullState.history,
     storyText: fullState.storyText,
     connectedParticipants: fullState.connectedParticipants,
+    revision: fullState.revision,
     updatedAt: fullState.updatedAt
   });
 });
 
-test("display and operator projections retain aggregate state", () => {
-  assert.equal(projectStateForRole(fullState, "display"), fullState);
+test("support projection contains only non-sensitive operational state", () => {
+  assert.deepEqual(projectStateForRole(fullState, "support"), {
+    phase: fullState.phase,
+    mode: fullState.mode,
+    connectedParticipants: fullState.connectedParticipants,
+    revision: fullState.revision,
+    updatedAt: fullState.updatedAt
+  });
+});
+
+test("display hides candidate tallies while voting and operator retains full state", () => {
+  const display = projectStateForRole(fullState, "display");
+  for (const field of ["counts", "probabilities", "lastDraw", "beta", "mode"]) {
+    assert.equal(field in display, false, field);
+  }
+  assert.equal(display.totalVotes, fullState.totalVotes);
   assert.equal(projectStateForRole(fullState, "operator"), fullState);
 });
 

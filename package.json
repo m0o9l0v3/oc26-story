@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:load": "node scripts/load-sse.mjs",
+    "test:load:poll": "node scripts/load-polling.mjs"
   },
   "engines": {
     "node": ">=20"

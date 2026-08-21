@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f7fb" />
+    <title>OC26 スタッフサポート</title>
+    <link rel="stylesheet" href="/support.css" />
+  </head>
+  <body>
+    <header class="support-header">
+      <div class="brand"><span aria-hidden="true"></span>OC26 STAFF SUPPORT</div>
+      <div id="connection-badge" class="status-badge reconnecting">確認中</div>
+    </header>
+
+    <main class="support-main">
+      <section class="hero">
+        <p class="eyebrow">補助スタッフ用</p>
+        <h1>参加者サポート</h1>
+        <p>難しい設定はありません。画面の色と案内に沿って対応してください。</p>
+      </section>
+
+      <section class="summary" aria-label="現在の状況">
+        <article>
+          <span>サーバー</span>
+          <strong id="server-status">確認中</strong>
+        </article>
+        <article>
+          <span>現在の進行</span>
+          <strong id="phase-status">確認中</strong>
+        </article>
+        <article>
+          <span>接続端末</span>
+          <strong id="participant-count">―</strong>
+        </article>
+        <article>
+          <span>投票方法</span>
+          <strong id="voting-mode">確認中</strong>
+        </article>
+      </section>
+
+      <section id="current-guidance" class="guidance-card" aria-live="polite">
+        <div class="guidance-icon" aria-hidden="true">i</div>
+        <div>
+          <p class="eyebrow">いま案内すること</p>
+          <h2 id="guidance-title">状態を確認しています</h2>
+          <p id="guidance-body">そのまま少しお待ちください。</p>
+        </div>
+      </section>
+
+      <section class="participant-link-card">
+        <div>
+          <p class="eyebrow">参加者画面</p>
+          <h2>画面が開かないとき</h2>
+          <p id="participant-url" class="url"></p>
+        </div>
+        <button id="copy-url" type="button">URLをコピー</button>
+      </section>
+
+      <section class="troubleshooting">
+        <h2>困ったときの対応</h2>
+        <div class="trouble-list">
+          <details open>
+            <summary><span class="signal green"></span>1台だけ画面が動かない</summary>
+            <ol>
+              <li>参加者画面を再読み込みします。</li>
+              <li>戻らなければ、上のURLを開き直します。</li>
+              <li>それでも直らなければ主担当を呼びます。</li>
+            </ol>
+          </details>
+          <details>
+            <summary><span class="signal yellow"></span>「再接続中」と表示された</summary>
+            <ol>
+              <li>まず10秒待ちます。</li>
+              <li>黄色のままなら再読み込みします。</li>
+              <li>複数台が同時に黄色なら主担当を呼びます。</li>
+            </ol>
+          </details>
+          <details>
+            <summary><span class="signal red"></span>複数台が接続できない</summary>
+            <ol>
+              <li>参加者へ「そのままお待ちください」と案内します。</li>
+              <li>すぐに主担当へ伝えます。</li>
+              <li>挙手投票へ切り替わったら、A・B・Cの挙手を数えます。</li>
+            </ol>
+          </details>
+          <details>
+            <summary>投票できたか分からない</summary>
+            <p>参加者画面に「選択済み」または投票完了の案内があれば完了です。締切前なら、同じ端末からもう一度選び直せます。</p>
+          </details>
+        </div>
+      </section>
+
+      <p class="privacy-note">この画面には票数、抽選確率、PIN、運営操作は表示されません。</p>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/support.js"></script>
+  </body>
+</html>

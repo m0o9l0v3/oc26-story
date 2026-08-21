@@ -45,6 +45,9 @@ export class StorySession {
   constructor(story, random = Math.random) {
     this.story = story;
     this.random = random;
+    this.revision = 0;
+    this.operatorRevision = 0;
+    this.recoveryNotice = null;
     this.reset();
   }
 
@@ -57,6 +60,9 @@ export class StorySession {
     this.beta = 1;
     this.mode = "online";
     this.lastDraw = null;
+    this.recoveryNotice = null;
+    this.revision += 1;
+    this.operatorRevision += 1;
     this.updatedAt = new Date().toISOString();
   }
 
@@ -65,7 +71,58 @@ export class StorySession {
   }
 
   touch() {
+    this.revision += 1;
+    this.operatorRevision += 1;
     this.updatedAt = new Date().toISOString();
+  }
+
+  touchParticipantState() {
+    this.revision += 1;
+    this.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * Returns the deliberately small state persisted between process restarts.
+   * Individual votes are excluded so a partial tally is never restored.
+   */
+  createSnapshot(schemaVersion = 2) {
+    return {
+      schemaVersion,
+      storyId: this.story.id,
+      revision: this.revision,
+      operatorRevision: this.operatorRevision,
+      phase: this.phase,
+      currentNodeId: this.currentNodeId,
+      history: structuredClone(this.history),
+      beta: this.beta,
+      mode: this.mode,
+      lastDraw: structuredClone(this.lastDraw),
+      updatedAt: this.updatedAt
+    };
+  }
+
+  /**
+   * Applies a snapshot already validated by SnapshotStore.
+   */
+  restoreSnapshot(snapshot, { resetIncompleteVote = false, source = "current" } = {}) {
+    this.phase = snapshot.phase;
+    this.currentNodeId = snapshot.currentNodeId;
+    this.history = structuredClone(snapshot.history);
+    this.beta = snapshot.beta;
+    this.mode = snapshot.mode;
+    this.lastDraw = structuredClone(snapshot.lastDraw);
+    this.votes = new Map();
+    this.manualCounts = new Map();
+    this.revision = snapshot.revision;
+    this.operatorRevision = Number.isSafeInteger(snapshot.operatorRevision)
+      ? snapshot.operatorRevision
+      : snapshot.revision;
+    this.updatedAt = snapshot.updatedAt;
+    this.recoveryNotice = resetIncompleteVote
+      ? "サーバー再起動のため、このラウンドの投票を準備状態へ戻しました。もう一度投票してください。"
+      : source === "previous"
+        ? "直近の保存データを読み込めなかったため、1つ前の状態を復元しました。"
+        : "保存されていた進行状態を復元しました。";
   }
 
   assertPhase(...allowed) {
@@ -122,20 +179,22 @@ export class StorySession {
       throw new Error("invalid choice");
     }
     this.votes.set(participantId, choiceId);
-    this.touch();
+    this.touchParticipantState();
   }
 
   setManualCounts(countsByChoice) {
     this.assertPhase("voting", "closed");
     if (this.mode !== "manual") throw new Error("manual mode is disabled");
 
+    const nextCounts = new Map();
     for (const choice of this.currentNode?.choices ?? []) {
       const raw = Number(countsByChoice[choice.id] ?? 0);
       if (!Number.isInteger(raw) || raw < 0 || raw > 999) {
         throw new Error("manual counts must be integers from 0 to 999");
       }
-      this.manualCounts.set(choice.id, raw);
+      nextCounts.set(choice.id, raw);
     }
+    this.manualCounts = nextCounts;
     this.touch();
   }
 
@@ -155,6 +214,13 @@ export class StorySession {
 
     this.lastDraw = {
       choiceId: winner.id,
+      // A revealed round is a completed result, not an in-progress vote. Keep
+      // its tally so a restart shows the same outcome, even though individual
+      // participant votes intentionally remain in memory only.
+      counts: choices.map((choice, index) => ({
+        choiceId: choice.id,
+        count: counts[index]
+      })),
       probabilities: Object.fromEntries(
         choices.map((choice, index) => [choice.id, probabilities[index]])
       ),
@@ -180,8 +246,8 @@ export class StorySession {
 
   setMode(mode) {
     if (!new Set(["online", "manual"]).has(mode)) throw new Error("invalid mode");
-    if (!["waiting", "intro", "token-demo", "round-ready", "voting"].includes(this.phase)) {
-      throw new Error("mode cannot be changed after voting closes");
+    if (!["waiting", "intro", "token-demo", "round-ready"].includes(this.phase)) {
+      throw new Error("投票開始後は通常の方法変更ができません。緊急切り替えを使用してください");
     }
     this.mode = mode;
     this.votes.clear();
@@ -189,8 +255,27 @@ export class StorySession {
     this.touch();
   }
 
+  switchToManualEmergency() {
+    this.assertPhase("voting");
+    if (this.mode === "manual") return;
+    this.mode = "manual";
+    this.votes.clear();
+    this.manualCounts.clear();
+    this.touch();
+  }
+
   getCounts() {
     const choices = this.currentNode?.choices ?? [];
+    if (["revealed", "finished"].includes(this.phase) && Array.isArray(this.lastDraw?.counts)) {
+      const finalizedCounts = new Map(
+        this.lastDraw.counts.map((entry) => [entry.choiceId, entry.count])
+      );
+      return choices.map((choice) => ({
+        choiceId: choice.id,
+        count: finalizedCounts.get(choice.id) ?? 0
+      }));
+    }
+
     if (this.mode === "manual") {
       return choices.map((choice) => ({
         choiceId: choice.id,
@@ -237,9 +322,10 @@ export class StorySession {
         ])
       ),
       lastDraw: this.lastDraw,
+      revision: this.revision,
+      recoveryNotice: this.recoveryNotice,
       connectedParticipants,
       updatedAt: this.updatedAt
     };
   }
 }
-
