@@ -68,3 +68,62 @@ test("挙手投票では手入力した票数を使用する", () => {
   session.setManualCounts({ "r1-envelope": 1, "r1-cat": 2, "r1-message": 7 });
   assert.deepEqual(session.getCounts().map((entry) => entry.count), [1, 2, 7]);
 });
+
+test("進行状態を個別票なしでスナップショット化し復元できる", () => {
+  const original = new StorySession(story, () => 0);
+  original.advance();
+  original.advance();
+  original.advance();
+  original.openVote();
+  original.castVote("participant-a", "r1-envelope");
+  original.closeVote();
+  original.draw();
+
+  const snapshot = original.createSnapshot();
+  assert.equal("votes" in snapshot, false);
+  assert.equal(snapshot.history.length, 1);
+
+  const restored = new StorySession(story);
+  restored.restoreSnapshot(snapshot);
+  assert.equal(restored.phase, "revealed");
+  assert.deepEqual(restored.history, original.history);
+  assert.equal(restored.getCounts().every((entry) => entry.count === 0), true);
+  assert.match(restored.recoveryNotice, /復元/);
+});
+
+test("投票途中からの復元通知を運営状態へ含める", () => {
+  const session = new StorySession(story);
+  session.restoreSnapshot(
+    {
+      schemaVersion: 1,
+      storyId: story.id,
+      revision: 8,
+      phase: "round-ready",
+      currentNodeId: "round-1",
+      history: [],
+      beta: 1,
+      mode: "online",
+      lastDraw: null,
+      updatedAt: "2026-08-20T00:00:00.000Z"
+    },
+    { resetIncompleteVote: true }
+  );
+
+  const state = session.getPublicState();
+  assert.equal(state.revision, 8);
+  assert.match(state.recoveryNotice, /もう一度投票/);
+});
+
+test("投票開始後の通常方式変更を拒否し、緊急切り替えだけを許可する", () => {
+  const session = new StorySession(story);
+  session.advance();
+  session.advance();
+  session.advance();
+  session.openVote();
+  session.castVote("participant-a", "r1-envelope");
+
+  assert.throws(() => session.setMode("manual"), /緊急切り替え/);
+  session.switchToManualEmergency();
+  assert.equal(session.mode, "manual");
+  assert.equal(session.getCounts().every((entry) => entry.count === 0), true);
+});

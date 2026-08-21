@@ -1,4 +1,4 @@
-const ROLES = new Set(["participant", "display", "operator"]);
+const ROLES = new Set(["participant", "display", "operator", "support"]);
 
 /**
  * Parses the externally supplied presentation role. Missing roles are treated
@@ -26,12 +26,30 @@ export function projectStateForRole(fullState, role) {
         history: fullState.history,
         storyText: fullState.storyText,
         connectedParticipants: fullState.connectedParticipants,
+        revision: fullState.revision,
         updatedAt: fullState.updatedAt
       };
-    case "display":
+    case "support":
+      return {
+        phase: fullState.phase,
+        mode: fullState.mode,
+        connectedParticipants: fullState.connectedParticipants,
+        revision: fullState.revision,
+        updatedAt: fullState.updatedAt
+      };
+    case "display": {
+      if (fullState.phase !== "voting") return fullState;
+      const {
+        counts: _counts,
+        probabilities: _probabilities,
+        lastDraw: _lastDraw,
+        beta: _beta,
+        mode: _mode,
+        ...publicVotingState
+      } = fullState;
+      return publicVotingState;
+    }
     case "operator":
-      // The display intentionally keeps the established aggregate fields.
-      // The operator receives the complete API state as well.
       return fullState;
     default:
       throw new Error("invalid state role");

@@ -45,6 +45,8 @@ export class StorySession {
   constructor(story, random = Math.random) {
     this.story = story;
     this.random = random;
+    this.revision = 0;
+    this.recoveryNotice = null;
     this.reset();
   }
 
@@ -57,6 +59,8 @@ export class StorySession {
     this.beta = 1;
     this.mode = "online";
     this.lastDraw = null;
+    this.recoveryNotice = null;
+    this.revision += 1;
     this.updatedAt = new Date().toISOString();
   }
 
@@ -65,7 +69,48 @@ export class StorySession {
   }
 
   touch() {
+    this.revision += 1;
     this.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * Returns the deliberately small state persisted between process restarts.
+   * Individual votes are excluded so a partial tally is never restored.
+   */
+  createSnapshot(schemaVersion = 1) {
+    return {
+      schemaVersion,
+      storyId: this.story.id,
+      revision: this.revision,
+      phase: this.phase,
+      currentNodeId: this.currentNodeId,
+      history: structuredClone(this.history),
+      beta: this.beta,
+      mode: this.mode,
+      lastDraw: structuredClone(this.lastDraw),
+      updatedAt: this.updatedAt
+    };
+  }
+
+  /**
+   * Applies a snapshot already validated by SnapshotStore.
+   */
+  restoreSnapshot(snapshot, { resetIncompleteVote = false, source = "current" } = {}) {
+    this.phase = snapshot.phase;
+    this.currentNodeId = snapshot.currentNodeId;
+    this.history = structuredClone(snapshot.history);
+    this.beta = snapshot.beta;
+    this.mode = snapshot.mode;
+    this.lastDraw = structuredClone(snapshot.lastDraw);
+    this.votes = new Map();
+    this.manualCounts = new Map();
+    this.revision = snapshot.revision;
+    this.updatedAt = snapshot.updatedAt;
+    this.recoveryNotice = resetIncompleteVote
+      ? "サーバー再起動のため、このラウンドの投票を準備状態へ戻しました。もう一度投票してください。"
+      : source === "previous"
+        ? "直近の保存データを読み込めなかったため、1つ前の状態を復元しました。"
+        : "保存されていた進行状態を復元しました。";
   }
 
   assertPhase(...allowed) {
@@ -180,10 +225,19 @@ export class StorySession {
 
   setMode(mode) {
     if (!new Set(["online", "manual"]).has(mode)) throw new Error("invalid mode");
-    if (!["waiting", "intro", "token-demo", "round-ready", "voting"].includes(this.phase)) {
-      throw new Error("mode cannot be changed after voting closes");
+    if (!["waiting", "intro", "token-demo", "round-ready"].includes(this.phase)) {
+      throw new Error("投票開始後は通常の方法変更ができません。緊急切り替えを使用してください");
     }
     this.mode = mode;
+    this.votes.clear();
+    this.manualCounts.clear();
+    this.touch();
+  }
+
+  switchToManualEmergency() {
+    this.assertPhase("voting");
+    if (this.mode === "manual") return;
+    this.mode = "manual";
     this.votes.clear();
     this.manualCounts.clear();
     this.touch();
@@ -237,9 +291,10 @@ export class StorySession {
         ])
       ),
       lastDraw: this.lastDraw,
+      revision: this.revision,
+      recoveryNotice: this.recoveryNotice,
       connectedParticipants,
       updatedAt: this.updatedAt
     };
   }
 }
-
