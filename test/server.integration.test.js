@@ -379,3 +379,62 @@ test("同じrevisionの運営操作が同時送信されても一度だけ反映
   }).then((response) => response.json());
   assert.equal(after.phase, "intro");
 });
+
+test("参加者が投票しても取得済みrevisionによる運営操作を拒否しない", async () => {
+  assert.equal((await operator("reset")).status, 200);
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal((await operator("advance")).status, 200);
+  }
+  assert.equal((await operator("open-vote")).status, 200);
+
+  const participant = await createParticipant();
+  const operatorBeforeVote = await fetch(`${BASE}/api/state?role=operator`, {
+    headers: { cookie: operatorCookie }
+  }).then((response) => response.json());
+  const vote = await jsonRequest("/api/vote", {
+    method: "PUT",
+    cookie: participant.cookie,
+    body: { choiceId: "r1-envelope" }
+  });
+  assert.equal(vote.status, 200);
+
+  const afterVote = await fetch(`${BASE}/api/state?role=operator`, {
+    headers: { cookie: operatorCookie }
+  }).then((response) => response.json());
+  assert.equal(afterVote.revision, operatorBeforeVote.revision);
+  assert.equal(afterVote.totalVotes, 1);
+
+  const action = await jsonRequest("/api/operator/actions", {
+    cookie: operatorCookie,
+    body: {
+      action: "set-beta",
+      beta: 2,
+      expectedRevision: operatorBeforeVote.revision
+    }
+  });
+  assert.equal(action.status, 200);
+  assert.equal((await action.json()).state.beta, 2);
+});
+
+test("運営操作が例外で失敗しても状態を戻し、後続キューへ応答できる", async () => {
+  const before = await fetch(`${BASE}/api/state?role=operator`, {
+    headers: { cookie: operatorCookie }
+  }).then((response) => response.json());
+  assert.equal(before.phase, "voting");
+
+  const invalid = await jsonRequest("/api/operator/actions", {
+    cookie: operatorCookie,
+    body: { action: "set-beta", beta: 3, expectedRevision: before.revision }
+  });
+  assert.equal(invalid.status, 400);
+
+  const afterFailure = await fetch(`${BASE}/api/state?role=operator`, {
+    headers: { cookie: operatorCookie }
+  }).then((response) => response.json());
+  assert.equal(afterFailure.beta, before.beta);
+  assert.equal(afterFailure.revision, before.revision);
+
+  const next = await operator("close-vote");
+  assert.equal(next.status, 200);
+  assert.equal((await next.json()).state.phase, "closed");
+});

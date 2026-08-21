@@ -38,6 +38,23 @@ test("参加者は締切まで投票を変更でき、一端末一票になる",
   ]);
 });
 
+test("参加者の投票は運営操作用revisionを変更しない", () => {
+  const session = new StorySession(story);
+  session.advance();
+  session.advance();
+  session.advance();
+  session.openVote();
+  const beforeVote = {
+    revision: session.revision,
+    operatorRevision: session.operatorRevision
+  };
+
+  session.castVote("device-1", "r1-envelope");
+
+  assert.equal(session.revision, beforeVote.revision + 1);
+  assert.equal(session.operatorRevision, beforeVote.operatorRevision);
+});
+
 test("投票から抽選、次ラウンドへの遷移が成立する", () => {
   const session = new StorySession(story, () => 0);
   session.advance();
@@ -69,25 +86,51 @@ test("挙手投票では手入力した票数を使用する", () => {
   assert.deepEqual(session.getCounts().map((entry) => entry.count), [1, 2, 7]);
 });
 
-test("進行状態を個別票なしでスナップショット化し復元できる", () => {
+test("不正な挙手数が混ざっても途中までの値を反映しない", () => {
+  const session = new StorySession(story);
+  session.advance();
+  session.advance();
+  session.advance();
+  session.setMode("manual");
+  session.openVote();
+  session.setManualCounts({ "r1-envelope": 1, "r1-cat": 2, "r1-message": 3 });
+  const before = session.getCounts();
+
+  assert.throws(
+    () => session.setManualCounts({ "r1-envelope": 99, "r1-cat": -1, "r1-message": 0 }),
+    /manual counts/
+  );
+  assert.deepEqual(session.getCounts(), before);
+});
+
+test("確定後の票数と抽選確率を個別票なしでスナップショット化し復元できる", () => {
   const original = new StorySession(story, () => 0);
   original.advance();
   original.advance();
   original.advance();
   original.openVote();
   original.castVote("participant-a", "r1-envelope");
+  original.castVote("participant-b", "r1-envelope");
+  original.castVote("participant-c", "r1-cat");
   original.closeVote();
   original.draw();
 
   const snapshot = original.createSnapshot();
   assert.equal("votes" in snapshot, false);
   assert.equal(snapshot.history.length, 1);
+  assert.deepEqual(snapshot.lastDraw.counts, [
+    { choiceId: "r1-envelope", count: 2 },
+    { choiceId: "r1-cat", count: 1 },
+    { choiceId: "r1-message", count: 0 }
+  ]);
 
   const restored = new StorySession(story);
   restored.restoreSnapshot(snapshot);
   assert.equal(restored.phase, "revealed");
   assert.deepEqual(restored.history, original.history);
-  assert.equal(restored.getCounts().every((entry) => entry.count === 0), true);
+  assert.deepEqual(restored.getPublicState().counts, original.getPublicState().counts);
+  assert.deepEqual(restored.getPublicState().probabilities, original.getPublicState().probabilities);
+  assert.equal(restored.getPublicState().totalVotes, 3);
   assert.match(restored.recoveryNotice, /復元/);
 });
 

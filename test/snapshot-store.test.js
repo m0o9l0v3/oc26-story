@@ -83,6 +83,27 @@ test("現在ファイルが破損していてもprevious世代から復元でき
   });
 });
 
+test("破損currentから復元後に保存してもknown-good previousを上書きしない", async () => {
+  await withStore(async (store) => {
+    const knownGood = snapshot({ revision: 1 });
+    await store.save(knownGood);
+    await store.save(snapshot({ revision: 2, beta: 2 }));
+    await writeFile(store.paths.current, "{broken JSON", "utf8");
+
+    const recovered = await store.load();
+    assert.equal(recovered.source, "previous");
+    assert.deepEqual(recovered.snapshot, knownGood);
+
+    await store.save(snapshot({ revision: 3, beta: 0.5 }));
+    assert.deepEqual(JSON.parse(await readFile(store.paths.previous, "utf8")), knownGood);
+
+    await writeFile(store.paths.current, "{broken again", "utf8");
+    const secondRecovery = await store.load();
+    assert.equal(secondRecovery.source, "previous");
+    assert.deepEqual(secondRecovery.snapshot, knownGood);
+  });
+});
+
 test("投票中または締切後の復元では安全にround-readyへ戻す", async () => {
   await withStore(async (store) => {
     for (const phase of ["voting", "closed"]) {
@@ -95,6 +116,90 @@ test("投票中または締切後の復元では安全にround-readyへ戻す", 
       assert.equal(restored.snapshot.lastDraw, null);
     }
   });
+});
+
+test("schema v1の進行状態をv2へ移行して復元できる", async () => {
+  await withStore(async (store) => {
+    const legacy = snapshot({
+      schemaVersion: 1,
+      revision: 7
+    });
+    await writeFile(store.paths.current, JSON.stringify(legacy), "utf8");
+
+    const restored = await store.load();
+    assert.equal(restored.status, "restored");
+    assert.equal(restored.resetIncompleteVote, false);
+    assert.equal(restored.snapshot.schemaVersion, SNAPSHOT_SCHEMA_VERSION);
+    assert.equal(restored.snapshot.revision, 7);
+    assert.equal(restored.snapshot.operatorRevision, 7);
+  });
+});
+
+test("票数を持たないschema v1の確定結果は虚偽表示せず再投票可能な状態へ戻す", async () => {
+  await withStore(async (store) => {
+    const winningChoice = story.nodes["round-1"].choices[0];
+    const legacy = snapshot({
+      schemaVersion: 1,
+      revision: 9,
+      phase: "revealed",
+      history: [{
+        round: 1,
+        nodeId: "round-1",
+        choiceId: winningChoice.id,
+        text: winningChoice.text
+      }],
+      lastDraw: {
+        choiceId: winningChoice.id,
+        probabilities: {
+          "r1-envelope": 0.5,
+          "r1-cat": 0.3,
+          "r1-message": 0.2
+        },
+        usedUniformFallback: false
+      }
+    });
+    await writeFile(store.paths.current, JSON.stringify(legacy), "utf8");
+
+    const restored = await store.load();
+    assert.equal(restored.status, "restored");
+    assert.equal(restored.resetIncompleteVote, true);
+    assert.equal(restored.snapshot.phase, "round-ready");
+    assert.equal(restored.snapshot.lastDraw, null);
+    assert.deepEqual(restored.snapshot.history, []);
+  });
+});
+
+test("確定票数と確率の不整合・余分な確率キー・0票フラグ不整合を拒否する", () => {
+  const winningChoice = story.nodes["round-1"].choices[0];
+  const finalized = snapshot({
+    phase: "revealed",
+    history: [{
+      round: 1,
+      nodeId: "round-1",
+      choiceId: winningChoice.id,
+      text: winningChoice.text
+    }],
+    lastDraw: {
+      choiceId: winningChoice.id,
+      counts: [
+        { choiceId: "r1-envelope", count: 2 },
+        { choiceId: "r1-cat", count: 1 },
+        { choiceId: "r1-message", count: 0 }
+      ],
+      probabilities: {
+        "r1-envelope": 0.5,
+        "r1-cat": 0.25,
+        "r1-message": 0.25,
+        unexpected: 0
+      },
+      usedUniformFallback: true
+    }
+  });
+
+  const validation = validateSnapshot(finalized, { story });
+  assert.equal(validation.valid, false);
+  assert.ok(validation.errors.some((error) => error.message.includes("確率の形式")));
+  assert.ok(validation.errors.some((error) => error.message.includes("0票時")));
 });
 
 test("schemaVersionまたはstoryIdの不一致を保存・復元時に拒否する", async () => {

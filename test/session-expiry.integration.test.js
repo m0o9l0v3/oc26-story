@@ -20,7 +20,7 @@ async function waitForServer() {
   throw new Error("session expiry server did not start");
 }
 
-test("運営者SSEはセッション期限後に配信を終了する", async () => {
+test("SSEは認証期限後に終了し、参加者は新しいセッションでポーリング復旧できる", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "oc26-expiry-"));
   const server = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
@@ -31,6 +31,7 @@ test("運営者SSEはセッション期限後に配信を終了する", async ()
       OPERATOR_PIN: "2468",
       NODE_ENV: "test",
       TEST_OPERATOR_TTL_MS: "200",
+      TEST_PARTICIPANT_TTL_MS: "200",
       TEST_HEARTBEAT_INTERVAL_MS: "20"
     },
     stdio: "ignore"
@@ -62,6 +63,32 @@ test("運営者SSEはセッション期限後に配信を終了する", async ()
     controller.abort();
     assert.equal(ended, true);
     assert.equal((await fetch(`${BASE}/api/state?role=operator`, { headers: { cookie } })).status, 401);
+
+    const participantSession = await fetch(`${BASE}/api/participants/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: "{}"
+    });
+    const expiredParticipantCookie = participantSession.headers.get("set-cookie").split(";", 1)[0];
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal((await fetch(`${BASE}/api/state?role=participant`, {
+      headers: { cookie: expiredParticipantCookie }
+    })).status, 401);
+
+    const recoveredSession = await fetch(`${BASE}/api/participants/session`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: BASE,
+        cookie: expiredParticipantCookie
+      },
+      body: "{}"
+    });
+    const recoveredCookie = recoveredSession.headers.get("set-cookie").split(";", 1)[0];
+    assert.notEqual(recoveredCookie, expiredParticipantCookie);
+    assert.equal((await fetch(`${BASE}/api/state?role=participant`, {
+      headers: { cookie: recoveredCookie }
+    })).status, 200);
   } finally {
     if (server.exitCode === null) {
       const exited = new Promise((resolve) => server.once("exit", resolve));

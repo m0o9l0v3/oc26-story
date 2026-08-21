@@ -18,6 +18,7 @@ let disconnectTimer = null;
 let lastRevision = -1;
 let lastServerInstanceId = "";
 let participantRecoveryInFlight = false;
+let participantRecoveryAttempted = false;
 let operatorActionInFlight = false;
 let pollTimer = null;
 let pollInFlight = false;
@@ -278,8 +279,7 @@ async function loginOperator(event) {
   if (submit) submit.disabled = true;
   try {
     await requestJson("/api/operator/login", { method: "POST", body: { pin } });
-    state = await requestJson("/api/state?role=operator");
-    renderOperator();
+    applyIncomingState(await requestJson("/api/state?role=operator"));
     connectEvents();
     startPolling();
     showToast("ログインしました", "success");
@@ -314,8 +314,9 @@ async function runOperatorAction(action, extra = {}) {
       body: { action, expectedRevision: state?.revision, ...extra }
     });
     if (result.state) {
-      state = result.state;
-      renderOperator();
+      // Apply the same monotonic revision rule as SSE and polling. A delayed
+      // action response must never overwrite a newer operator state.
+      applyIncomingState(result.state);
     }
     showToast("操作を反映しました", "success");
   } catch (error) {
@@ -372,12 +373,18 @@ async function pollState() {
   pollInFlight = true;
   try {
     const nextState = await requestJson(`/api/state?role=${pathRole}`);
+    participantRecoveryAttempted = false;
     applyIncomingState(nextState);
     events?.close();
     events = null;
     setConnectionState("fallback");
   } catch (error) {
     if (pathRole === "participant" && error.status === 401) {
+      if (participantRecoveryAttempted) {
+        setConnectionState("disconnected");
+        return;
+      }
+      participantRecoveryAttempted = true;
       try {
         await recoverParticipantSession();
       } catch {
@@ -407,48 +414,42 @@ function stopPolling() {
   pollTimer = null;
 }
 
+function switchToPollingFallback() {
+  // EventSource は内部で再接続を試みる。ここで新しい EventSource を作り直すと、
+  // トンネルやプロキシが SSE を扱えない場合に、再接続と参加者セッション作成が
+  // error のたびに連鎖してしまうため、SSE は明示的に止めてポーリングへ切り替える。
+  events?.close();
+  events = null;
+  lastRealtimeAt = 0;
+  if (connectionState !== "fallback") setConnectionState("reconnecting");
+  startPolling();
+  void pollState();
+}
+
 function connectEvents() {
   events?.close();
   setConnectionState("reconnecting");
-  events = new EventSource(`/api/events?role=${pathRole}`);
-  events.addEventListener("open", () => {
+  const source = new EventSource(`/api/events?role=${pathRole}`);
+  events = source;
+  source.addEventListener("open", () => {
+    if (events !== source) return;
     if (!lastRealtimeAt) setConnectionState("reconnecting");
   });
-  events.addEventListener("message", (event) => {
+  source.addEventListener("message", (event) => {
+    if (events !== source) return;
     const nextState = JSON.parse(event.data);
     lastRealtimeAt = Date.now();
     setConnectionState("connected");
     applyIncomingState(nextState);
   });
-  events.addEventListener("heartbeat", () => {
+  source.addEventListener("heartbeat", () => {
+    if (events !== source) return;
     lastRealtimeAt = Date.now();
     setConnectionState("connected");
   });
-  events.addEventListener("error", async () => {
-    lastRealtimeAt = 0;
-    if (connectionState !== "fallback") setConnectionState("reconnecting");
-    if (pathRole === "participant" && !participantRecoveryInFlight) {
-      try {
-        await recoverParticipantSession();
-        events?.close();
-        connectEvents();
-      } catch {
-        // EventSource自身の再接続を継続する。
-      }
-    }
-    if (pathRole === "operator") {
-      try {
-        await requestJson("/api/state?role=operator");
-      } catch (error) {
-        if (error.status === 401) {
-          events?.close();
-          events = null;
-          state = null;
-          renderOperatorLogin("セッションの有効期限が切れました。もう一度ログインしてください");
-          return;
-        }
-      }
-    }
+  source.addEventListener("error", () => {
+    if (events !== source) return;
+    switchToPollingFallback();
     showToast("再接続しています…", "error");
   });
 }
@@ -490,7 +491,7 @@ async function initialize() {
     }
     if (pathRole === "operator") {
       try {
-        state = await requestJson("/api/state?role=operator");
+        applyIncomingState(await requestJson("/api/state?role=operator"));
       } catch (error) {
         if (error.status === 401) {
           renderOperatorLogin();
@@ -498,7 +499,6 @@ async function initialize() {
         }
         throw error;
       }
-      renderOperator();
     }
     if (pathRole === "display") {
       applyIncomingState(await requestJson("/api/state?role=display"));

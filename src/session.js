@@ -46,6 +46,7 @@ export class StorySession {
     this.story = story;
     this.random = random;
     this.revision = 0;
+    this.operatorRevision = 0;
     this.recoveryNotice = null;
     this.reset();
   }
@@ -61,6 +62,7 @@ export class StorySession {
     this.lastDraw = null;
     this.recoveryNotice = null;
     this.revision += 1;
+    this.operatorRevision += 1;
     this.updatedAt = new Date().toISOString();
   }
 
@@ -70,6 +72,12 @@ export class StorySession {
 
   touch() {
     this.revision += 1;
+    this.operatorRevision += 1;
+    this.updatedAt = new Date().toISOString();
+  }
+
+  touchParticipantState() {
+    this.revision += 1;
     this.updatedAt = new Date().toISOString();
   }
 
@@ -77,11 +85,12 @@ export class StorySession {
    * Returns the deliberately small state persisted between process restarts.
    * Individual votes are excluded so a partial tally is never restored.
    */
-  createSnapshot(schemaVersion = 1) {
+  createSnapshot(schemaVersion = 2) {
     return {
       schemaVersion,
       storyId: this.story.id,
       revision: this.revision,
+      operatorRevision: this.operatorRevision,
       phase: this.phase,
       currentNodeId: this.currentNodeId,
       history: structuredClone(this.history),
@@ -105,6 +114,9 @@ export class StorySession {
     this.votes = new Map();
     this.manualCounts = new Map();
     this.revision = snapshot.revision;
+    this.operatorRevision = Number.isSafeInteger(snapshot.operatorRevision)
+      ? snapshot.operatorRevision
+      : snapshot.revision;
     this.updatedAt = snapshot.updatedAt;
     this.recoveryNotice = resetIncompleteVote
       ? "サーバー再起動のため、このラウンドの投票を準備状態へ戻しました。もう一度投票してください。"
@@ -167,20 +179,22 @@ export class StorySession {
       throw new Error("invalid choice");
     }
     this.votes.set(participantId, choiceId);
-    this.touch();
+    this.touchParticipantState();
   }
 
   setManualCounts(countsByChoice) {
     this.assertPhase("voting", "closed");
     if (this.mode !== "manual") throw new Error("manual mode is disabled");
 
+    const nextCounts = new Map();
     for (const choice of this.currentNode?.choices ?? []) {
       const raw = Number(countsByChoice[choice.id] ?? 0);
       if (!Number.isInteger(raw) || raw < 0 || raw > 999) {
         throw new Error("manual counts must be integers from 0 to 999");
       }
-      this.manualCounts.set(choice.id, raw);
+      nextCounts.set(choice.id, raw);
     }
+    this.manualCounts = nextCounts;
     this.touch();
   }
 
@@ -200,6 +214,13 @@ export class StorySession {
 
     this.lastDraw = {
       choiceId: winner.id,
+      // A revealed round is a completed result, not an in-progress vote. Keep
+      // its tally so a restart shows the same outcome, even though individual
+      // participant votes intentionally remain in memory only.
+      counts: choices.map((choice, index) => ({
+        choiceId: choice.id,
+        count: counts[index]
+      })),
       probabilities: Object.fromEntries(
         choices.map((choice, index) => [choice.id, probabilities[index]])
       ),
@@ -245,6 +266,16 @@ export class StorySession {
 
   getCounts() {
     const choices = this.currentNode?.choices ?? [];
+    if (["revealed", "finished"].includes(this.phase) && Array.isArray(this.lastDraw?.counts)) {
+      const finalizedCounts = new Map(
+        this.lastDraw.counts.map((entry) => [entry.choiceId, entry.count])
+      );
+      return choices.map((choice) => ({
+        choiceId: choice.id,
+        count: finalizedCounts.get(choice.id) ?? 0
+      }));
+    }
+
     if (this.mode === "manual") {
       return choices.map((choice) => ({
         choiceId: choice.id,

@@ -36,7 +36,10 @@ const serverInstanceId = randomUUID();
 const snapshotStore = new SnapshotStore({ directory: DATA_DIR, story });
 let recoveryStatus = { status: "empty", resetIncompleteVote: false, issues: [] };
 let persistenceError = null;
-let operatorActionTail = Promise.resolve();
+let sessionMutationTail = Promise.resolve();
+let pendingSessionMutations = 0;
+let shuttingDown = false;
+const MAX_PENDING_SESSION_MUTATIONS = 1_000;
 const eventClients = new Set();
 const participantConnections = new Map();
 const participantActivity = new Map();
@@ -91,6 +94,12 @@ function fullState() {
 
 function stateForRole(role, participantId = null) {
   const projected = projectStateForRole(fullState(), role);
+  if (role === "operator") {
+    // The operator-facing revision is an optimistic-lock token. Participant
+    // votes still advance the public state revision, but must not invalidate
+    // an otherwise current operator command.
+    return { ...projected, revision: session.operatorRevision, serverInstanceId };
+  }
   if (role !== "participant") return { ...projected, serverInstanceId };
   return {
     ...projected,
@@ -124,6 +133,12 @@ function sendError(response, error) {
 
 async function persistSession() {
   try {
+    const testDelay = process.env.NODE_ENV === "test"
+      ? Number(process.env.TEST_SNAPSHOT_SAVE_DELAY_MS || 0)
+      : 0;
+    if (Number.isFinite(testDelay) && testDelay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, testDelay));
+    }
     await snapshotStore.save(session.createSnapshot());
     persistenceError = null;
     recoveryStatus = { status: "restored", source: "current", resetIncompleteVote: false, issues: [] };
@@ -135,9 +150,17 @@ async function persistSession() {
 
 function broadcast() {
   for (const client of eventClients) {
+    if (client.response.destroyed || client.response.writableEnded) {
+      removeEventClient(client);
+      continue;
+    }
     const state = stateForRole(client.role, client.participantId);
     const payload = `id: ${state.revision ?? session.revision}\nevent: message\ndata: ${JSON.stringify(state)}\n\n`;
-    client.response.write(payload);
+    try {
+      client.response.write(payload);
+    } catch {
+      removeEventClient(client);
+    }
   }
 }
 
@@ -151,6 +174,12 @@ function removeParticipantConnection(clientId) {
   const next = (participantConnections.get(clientId) ?? 1) - 1;
   if (next <= 0) participantConnections.delete(clientId);
   else participantConnections.set(clientId, next);
+}
+
+function removeEventClient(client) {
+  if (!eventClients.delete(client)) return false;
+  if (client.participantId) removeParticipantConnection(client.participantId);
+  return true;
 }
 
 function operatorToken(request) {
@@ -196,11 +225,11 @@ function handleEvents(request, response, url) {
   if (participantId) addParticipantConnection(participantId);
   broadcast();
 
-  request.on("close", () => {
-    eventClients.delete(client);
-    if (participantId) removeParticipantConnection(participantId);
-    broadcast();
-  });
+  const cleanup = () => {
+    if (removeEventClient(client)) broadcast();
+  };
+  request.on("close", cleanup);
+  response.on("error", cleanup);
 }
 
 async function handleParticipantSession(request, response) {
@@ -231,9 +260,11 @@ async function handleVote(request, response) {
     });
   }
   const body = await readJson(request);
-  session.castVote(participantId, body.choiceId);
-  broadcast();
-  sendJson(response, 200, { ok: true, selectedChoiceId: body.choiceId });
+  await enqueueSessionMutation(() => {
+    session.castVote(participantId, body.choiceId);
+    broadcast();
+    sendJson(response, 200, { ok: true, selectedChoiceId: body.choiceId });
+  });
 }
 
 async function handleOperatorLogin(request, response) {
@@ -278,7 +309,7 @@ async function handleOperatorLogout(request, response) {
 
 async function handleOperator(request, response) {
   assertSameOrigin(request);
-  requireOperator(request);
+  const authToken = requireOperator(request);
   const body = await readJson(request);
   if (!OPERATOR_ACTIONS.has(body.action)) {
     throw new ApiError(400, "INVALID_OPERATOR_ACTION", "運営操作が正しくありません");
@@ -286,50 +317,62 @@ async function handleOperator(request, response) {
   if (!Number.isSafeInteger(body.expectedRevision)) {
     throw new ApiError(400, "EXPECTED_REVISION_REQUIRED", "画面の状態番号がありません。画面を再読み込みしてください");
   }
-  if (body.expectedRevision !== session.revision) {
+
+  // Reading an HTTP body can take an unbounded amount of time. Do it before
+  // entering the shared mutation queue so one slow authenticated connection
+  // cannot freeze participant votes and every other operator request.
+  await enqueueSessionMutation(async () => {
+    if (!operatorSessions.has(authToken)) {
+      throw new ApiError(401, "OPERATOR_AUTH_REQUIRED", "運営者としてログインしてください");
+    }
+    await applyOperatorAction(body, response);
+  });
+}
+
+async function applyOperatorAction(body, response) {
+  if (body.expectedRevision !== session.operatorRevision) {
     throw new ApiError(409, "STALE_OPERATOR_STATE", "別の操作が先に反映されました。最新画面を確認してください");
   }
   const before = session.createSnapshot();
   const beforeVotes = new Map(session.votes);
   const beforeManualCounts = new Map(session.manualCounts);
   const beforeRecoveryNotice = session.recoveryNotice;
-  switch (body.action) {
-    case "advance":
-      session.advance();
-      break;
-    case "open-vote":
-      session.openVote();
-      break;
-    case "close-vote":
-      session.closeVote();
-      break;
-    case "draw":
-      session.draw();
-      break;
-    case "set-beta":
-      session.setBeta(body.beta);
-      break;
-    case "set-mode":
-      session.setMode(body.mode);
-      break;
-    case "emergency-manual":
-      session.switchToManualEmergency();
-      break;
-    case "set-manual-counts":
-      if (!body.counts || typeof body.counts !== "object" || Array.isArray(body.counts)) {
-        throw new ApiError(400, "INVALID_MANUAL_COUNTS", "挙手数の形式が正しくありません");
-      }
-      if (Object.keys(body.counts).some((key) => !session.currentNode?.choices.some((choice) => choice.id === key))) {
-        throw new ApiError(400, "INVALID_MANUAL_COUNTS", "存在しない選択肢の挙手数が含まれています");
-      }
-      session.setManualCounts(body.counts ?? {});
-      break;
-    case "reset":
-      session.reset();
-      break;
-  }
-
   try {
+    switch (body.action) {
+      case "advance":
+        session.advance();
+        break;
+      case "open-vote":
+        session.openVote();
+        break;
+      case "close-vote":
+        session.closeVote();
+        break;
+      case "draw":
+        session.draw();
+        break;
+      case "set-beta":
+        session.setBeta(body.beta);
+        break;
+      case "set-mode":
+        session.setMode(body.mode);
+        break;
+      case "emergency-manual":
+        session.switchToManualEmergency();
+        break;
+      case "set-manual-counts":
+        if (!body.counts || typeof body.counts !== "object" || Array.isArray(body.counts)) {
+          throw new ApiError(400, "INVALID_MANUAL_COUNTS", "挙手数の形式が正しくありません");
+        }
+        if (Object.keys(body.counts).some((key) => !session.currentNode?.choices.some((choice) => choice.id === key))) {
+          throw new ApiError(400, "INVALID_MANUAL_COUNTS", "存在しない選択肢の挙手数が含まれています");
+        }
+        session.setManualCounts(body.counts);
+        break;
+      case "reset":
+        session.reset();
+        break;
+    }
     await persistSession();
   } catch (error) {
     restoreBeforeFailedOperatorAction(before, beforeVotes, beforeManualCounts, beforeRecoveryNotice);
@@ -337,14 +380,28 @@ async function handleOperator(request, response) {
   }
   broadcast();
   sendJson(response, 200, { ok: true, state: stateForRole("operator") }, {
-    "x-oc26-revision": String(session.revision)
+    "x-oc26-revision": String(session.operatorRevision)
   });
 }
 
-function enqueueOperatorAction(task) {
-  const queued = operatorActionTail.then(task, task);
-  operatorActionTail = queued.catch(() => {});
-  return queued;
+function enqueueSessionMutation(task) {
+  // Keep an operator mutation, its durable save, and a possible rollback
+  // atomic with respect to participant votes. A vote waits for rollback and
+  // is only acknowledged after it has been applied to the resulting state.
+  if (shuttingDown) {
+    return Promise.reject(new ApiError(503, "SERVER_SHUTTING_DOWN", "サーバーを終了しています。少し待ってから再接続してください"));
+  }
+  if (pendingSessionMutations >= MAX_PENDING_SESSION_MUTATIONS) {
+    return Promise.reject(new ApiError(503, "MUTATION_QUEUE_BUSY", "操作が集中しています。少し待ってから再度お試しください", {
+      headers: { "retry-after": "1" }
+    }));
+  }
+  pendingSessionMutations += 1;
+  const queued = sessionMutationTail.then(task, task);
+  sessionMutationTail = queued.catch(() => {});
+  return queued.finally(() => {
+    pendingSessionMutations -= 1;
+  });
 }
 
 function serveStatic(response, pathname) {
@@ -403,7 +460,7 @@ const server = createServer(async (request, response) => {
     } else if (request.method === "POST" && url.pathname === "/api/operator/logout") {
       await handleOperatorLogout(request, response);
     } else if (request.method === "POST" && ["/api/operator", "/api/operator/actions"].includes(url.pathname)) {
-      await enqueueOperatorAction(() => handleOperator(request, response));
+      await handleOperator(request, response);
     } else if (request.method === "GET" && url.pathname === "/api/operator/export") {
       requireOperator(request);
       response.writeHead(200, {
@@ -431,11 +488,14 @@ const heartbeat = setInterval(() => {
         : false;
     if (expired) {
       client.response.end();
-      eventClients.delete(client);
-      if (client.participantId) removeParticipantConnection(client.participantId);
+      removeEventClient(client);
       continue;
     }
-    client.response.write(`event: heartbeat\ndata: {"serverInstanceId":"${serverInstanceId}"}\n\n`);
+    try {
+      client.response.write(`event: heartbeat\ndata: {"serverInstanceId":"${serverInstanceId}"}\n\n`);
+    } catch {
+      removeEventClient(client);
+    }
   }
 }, HEARTBEAT_INTERVAL_MS);
 heartbeat.unref();
@@ -477,18 +537,23 @@ start().catch((error) => {
   process.exitCode = 1;
 });
 
-let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  const forcedExit = setTimeout(() => process.exit(1), 3_000);
+  forcedExit.unref();
+  const closed = new Promise((resolve) => server.close(resolve));
+  for (const client of eventClients) client.response.end();
+  eventClients.clear();
   try {
-    await operatorActionTail;
+    await sessionMutationTail;
     await snapshotStore.save(session.createSnapshot());
   } catch (error) {
     console.error("終了時に進行状態を保存できませんでした", error);
   }
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 3_000).unref();
+  await closed;
+  clearTimeout(forcedExit);
+  process.exit(0);
 }
 
 process.on("SIGTERM", shutdown);

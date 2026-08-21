@@ -144,3 +144,74 @@ test("再起動後に履歴を復元し、投票途中のラウンドを安全�
     await rm(dataDirectory, { recursive: true, force: true });
   }
 });
+
+test("抽選確定後の再起動でも票数と抽選確率を一貫して表示する", async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "oc26-revealed-recovery-"));
+  let serverProcess = startServer(dataDirectory);
+  try {
+    await waitForServer();
+    let cookie = await login();
+    await action(cookie, "reset");
+    await action(cookie, "advance");
+    await action(cookie, "advance");
+    await action(cookie, "advance");
+    await action(cookie, "open-vote");
+
+    const participantCookies = [];
+    for (let index = 0; index < 3; index += 1) {
+      const participantSession = await fetch(`${BASE}/api/participants/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE },
+        body: "{}"
+      });
+      participantCookies.push(participantSession.headers.get("set-cookie").split(";", 1)[0]);
+    }
+    const votingState = await fetch(`${BASE}/api/state?role=participant`, {
+      headers: { cookie: participantCookies[0] }
+    }).then((response) => response.json());
+    await Promise.all([
+      fetch(`${BASE}/api/vote`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: BASE, cookie: participantCookies[0] },
+        body: JSON.stringify({ choiceId: votingState.currentNode.choices[0].id })
+      }),
+      fetch(`${BASE}/api/vote`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: BASE, cookie: participantCookies[1] },
+        body: JSON.stringify({ choiceId: votingState.currentNode.choices[0].id })
+      }),
+      fetch(`${BASE}/api/vote`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: BASE, cookie: participantCookies[2] },
+        body: JSON.stringify({ choiceId: votingState.currentNode.choices[1].id })
+      })
+    ].map(async (response) => assert.equal((await response).status, 200)));
+
+    await action(cookie, "close-vote");
+    await action(cookie, "draw");
+    const beforeRestart = await fetch(`${BASE}/api/state?role=operator`, {
+      headers: { cookie }
+    }).then((response) => response.json());
+    assert.equal(beforeRestart.phase, "revealed");
+    assert.equal(beforeRestart.totalVotes, 3);
+
+    serverProcess.kill("SIGKILL");
+    await waitForExit(serverProcess);
+    serverProcess = startServer(dataDirectory);
+    await waitForServer();
+    cookie = await login();
+    const afterRestart = await fetch(`${BASE}/api/state?role=operator`, {
+      headers: { cookie }
+    }).then((response) => response.json());
+
+    assert.equal(afterRestart.phase, "revealed");
+    assert.deepEqual(afterRestart.counts, beforeRestart.counts);
+    assert.equal(afterRestart.totalVotes, beforeRestart.totalVotes);
+    assert.deepEqual(afterRestart.probabilities, beforeRestart.probabilities);
+    assert.deepEqual(afterRestart.lastDraw, beforeRestart.lastDraw);
+  } finally {
+    serverProcess?.kill("SIGTERM");
+    await waitForExit(serverProcess).catch(() => {});
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
